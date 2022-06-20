@@ -12,7 +12,7 @@ class ProductRepository implements ProductRepositoryInterface
         DB::table('products')->insert($data);
     }
 
-    public function erase(): void
+    public function truncate(): void
     {
         DB::table('products')->truncate();
     }

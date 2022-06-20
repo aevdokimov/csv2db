@@ -8,7 +8,7 @@ interface ProductRepositoryInterface
 {
     public function save(array $data): void;
     
-    public function erase(): void;
+    public function truncate(): void;
 
     public function paginate(int $perPage = 15, int $page = 1): LengthAwarePaginator;
 }

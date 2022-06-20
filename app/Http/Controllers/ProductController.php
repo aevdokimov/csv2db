@@ -22,13 +22,13 @@ class ProductController extends Controller
             $request->csv_file->storeAs('csvses', 'products.csv')
         );
 
-        $dto = new UploadCsvData(
+        $uploadCsvData = new UploadCsvData(
             $path,
             $request->separator,
             $request->boolean('detect_encoding')
         );
 
-        ImportProductsCsv::dispatch($dto);
+        ImportProductsCsv::dispatch($uploadCsvData);
 
         return redirect()->back()->with('success', 'Данные появятся после обработки');
     }

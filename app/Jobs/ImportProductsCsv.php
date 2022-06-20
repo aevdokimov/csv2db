@@ -21,7 +21,7 @@ class ImportProductsCsv implements ShouldQueue
      * @return void
      */
     public function __construct(
-        public UploadCsvData $dto
+        public UploadCsvData $uploadCsvData
     ) {}
 
     /**
@@ -31,7 +31,7 @@ class ImportProductsCsv implements ShouldQueue
      */
     public function handle(ProductService $service)
     {
-        $service->erase();
-        $service->importCsv($this->dto);
+        $service->truncate();
+        $service->importCsv($this->uploadCsvData);
     }
 }

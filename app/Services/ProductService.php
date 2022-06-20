@@ -3,25 +3,31 @@
 namespace App\Services;
 
 use App\DataTransferObjects\UploadCsvData;
+use App\Exceptions\UnprocessableEncodingException;
 use App\Repositories\ProductRepositoryInterface;
-use phpDocumentor\Reflection\Types\Boolean;
 
 class ProductService
 {
     /**
+     * Сколько столбцов должно быть. Если меньше - строка не валидна,
+     * если больше - в последнем поле был разделитель CSV и надо его склеить
+     */
+    public const REQ_COLUMNS_COUNT = 14;
+
+    /**
      * Сколько продуктов за раз уходит в репозиторий
      */
-    const PRODUCTS_PER_BATCH = 50;
+    public const PRODUCTS_PER_BATCH = 50;
 
     /**
      * Кодировка, в которой должны быть данные
      */
-    const TARGET_ENCODING = 'UTF-8';
+    public const TARGET_ENCODING = 'UTF-8';
     
     /**
      * Карта полей в таблице по номеру поля в CSV
      */
-    const CSV_DB_MAP = ['sku', 'title', 'level_1', 'level_2', 'level_3',
+    public const CSV_DB_MAP = ['sku', 'title', 'level_1', 'level_2', 'level_3',
         'price', 'price_sp', 'count', 'properties', 'joint_purchases', 'units',
         'img', 'on_homepage', 'description'];
 
@@ -32,19 +38,20 @@ class ProductService
     /**
      * Удаляет все данные в хранилище
      */
-    public function erase(): void
+    public function truncate(): void
     {
-        $this->repository->erase();
+        $this->repository->truncate();
     }
 
-    public function importCsv(UploadCsvData $dto): void
+    public function importCsv(UploadCsvData $uploadCsvData): void
     {
-        $fh = fopen($dto->csvFilePath, 'r');
+        $fh = fopen($uploadCsvData->csvFilePath, 'r');
         
         // Пропускаем первую строку-заголовок
         $headLine = fgets($fh);
 
-        $sourceEncoding = $dto->detectEncoding
+        // Определяем кодировку по первой строке, если надо
+        $sourceEncoding = $uploadCsvData->detectEncoding
             ? mb_detect_encoding(
                 $headLine,
                 ['UTF-8', 'Windows-1251', 'ISO-8859-1']
@@ -52,26 +59,37 @@ class ProductService
             : self::TARGET_ENCODING;
 
         $batch = [];
+        
         // Не используем fgetcsv() т.к. файл явно не валидный CSV
         while ($line = fgets($fh)) {
-            
-            if (!$this->_validateEncoding($sourceEncoding, $line)) {
+            try {
+                $line = $this->normalizeEncoding($line, $sourceEncoding);
+            } catch (UnprocessableEncodingException $exception) {
                 continue;
             }
 
             $fields = explode(
-                $dto->separator,
+                $uploadCsvData->separator,
+                // К стандартным символам trim() добавляем кавычку и запятую
                 trim($line, "\", \t\n\r\0\x0B")
             );
 
-            // Невалидные строки скипаем
-            if ($fields = $this->_validProductFields($fields, $dto->separator)) {
-                $batch[] = $fields;
+            // Неполные строки скипаем
+            if (count($fields) < self::REQ_COLUMNS_COUNT) {
+                continue;
+            }
 
-                if (count($batch) >= self::PRODUCTS_PER_BATCH) {
-                    $this->repository->save($batch);
-                    $batch = [];
-                }
+            // Склеиваем колонку-описание, если она разделилось
+            $fields = $this->fitToReqColumns($fields, $uploadCsvData->separator);
+
+            $fields = $this->prettifyProductFields($fields);
+
+            // Меняем численные ключи на нужные нам
+            $batch[] = array_combine(self::CSV_DB_MAP, $fields);	
+
+            if (count($batch) >= self::PRODUCTS_PER_BATCH) {
+                $this->repository->save($batch);
+                $batch = [];
             }
         }
         
@@ -81,46 +99,52 @@ class ProductService
     }
 
     /**
-     * Перекодирует строку в целевую кодировку если она отличается от исходной,
-     * или проверяет на соответствие строки заявленной кодировке
+     * Перекодирует строку в целевую кодировку если она отличается от исходной
      *
      * @param string $sourceEncoding исходная кодировка строки
      * @param string $line строка
-     * @return boolean соответствует ли $sourceEncoding нужной кодировке
+     * @return string строка в нужной кодировке
      */
-    private function _validateEncoding(string $sourceEncoding, string &$line): bool
+    private function normalizeEncoding(string $line, string $sourceEncoding): string
     {
         if (self::TARGET_ENCODING !== $sourceEncoding) {
             $line = iconv($sourceEncoding, self::TARGET_ENCODING, $line);
-        } else {
-            if (!mb_check_encoding($line, self::TARGET_ENCODING)) {
-                return false;
-            }
         }
+        
+        if (!mb_check_encoding($line, self::TARGET_ENCODING)) {
+            throw new UnprocessableEncodingException('Unknown encoding', 422);
+        }        
 
-        return true;
+        return $line;
     }
 
     /**
-     * Приводит поля к валидному состоянию с ключами из self::CSV_DB_MAP
-     * или возвращает false
+     * Поля, идущие после последнего, склеиваются в него. Лишние поля появляются
+     * из-за символа-разделителя внутри поля
+     *
+     * @param array $fields
+     * @return array
+     */
+    private function fitToReqColumns(array $fields, string $separator): array
+    {
+        for ($i = self::REQ_COLUMNS_COUNT; $i < count($fields); $i++) {
+            $fields[self::REQ_COLUMNS_COUNT - 1] = $fields[self::REQ_COLUMNS_COUNT - 1] . $separator . ' ' . $fields[$i];
+        }
+        $fields = array_slice($fields, 0, self::REQ_COLUMNS_COUNT);
+
+        return $fields;
+    }
+
+    /**
+     * Приводит поля к валидному состоянию: удаляет лишние символы, ставит 0
+     * в пустых boolean полях
      *
      * @param array $fields поля прочитанные из строки CSV-файла
      * @param string $separator разделитель CSV
-     * @return array|false массив полей продукта либо false
+     * @return array массив полей продукта
      */
-    private function _validProductFields(array $fields, string $separator): array|false
+    private function prettifyProductFields(array $fields): array
     {
-        if (count($fields) < 14) {
-            return false;
-        }
-
-        // Если полей > 14, значит в описании был символ-разделитель
-        for ($i = 14; $i < count($fields); $i++) {
-            $fields[13] = $fields[13].$separator.' '.$fields[$i];
-        }
-        $fields = array_slice($fields, 0, 14);
-
         foreach ($fields as &$field) {
             $field = trim($field, '"');
             $field = str_replace('\\""', '"', $field);
@@ -131,19 +155,21 @@ class ProductService
             );
         }
 
-        // Меняем ключи
-        $fields = array_combine(self::CSV_DB_MAP, $fields);
+        // price
+        $fields[5] = floatval($fields[5]);
+        // price_sp
+        $fields[6] = floatval($fields[6]);
+        // count
+        $fields[7] = intval($fields[7]);
         
-        $fields['price'] = floatval($fields['price']);
-        $fields['price_sp'] = floatval($fields['price_sp']);
-        $fields['count'] = intval($fields['count']);
-        
-        if ($fields['joint_purchases'] !== '1') {
-            $fields['joint_purchases'] = '0';
+        // joint_purchases
+        if ($fields[9] !== '1') {
+            $fields[9] = '0';
         }
 
-        if ($fields['on_homepage'] !== '1') {
-            $fields['on_homepage'] = '0';
+        // on_homepage
+        if ($fields[12] !== '1') {
+            $fields[12] = '0';
         }
 
         return $fields;
